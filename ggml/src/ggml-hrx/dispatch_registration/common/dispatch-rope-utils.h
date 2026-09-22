@@ -23,7 +23,8 @@ inline float rope_yarn_ramp(float low, float high, int64_t i0) {
 }
 
 inline float rope_yarn_corr_dim(int n_dims, int n_ctx_orig, float n_rot, float base) {
-    return static_cast<float>(n_dims) * std::log(static_cast<float>(n_ctx_orig) / (n_rot * 2.0f * static_cast<float>(M_PI))) /
+    constexpr float pi = 3.14159265358979323846f;
+    return static_cast<float>(n_dims) * std::log(static_cast<float>(n_ctx_orig) / (n_rot * 2.0f * pi)) /
            (2.0f * std::log(base));
 }
 

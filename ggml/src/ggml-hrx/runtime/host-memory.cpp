@@ -20,6 +20,7 @@ namespace {
 
 static constexpr size_t kMaxInlineUploadBytes = 63 * 1024;
 static constexpr size_t kLargeHostUploadBytes = 1024 * 1024;
+static constexpr size_t kSharedScaleRows      = 4;
 
 struct SymmetricI4Block {
     std::array<ggml_fp16_t, 8>             scales   = {};
@@ -144,13 +145,13 @@ static bool fit_symmetric_scale(const float * values,
     return std::isfinite(encoded_scale) && encoded_scale > 0.0f;
 }
 
-static bool fit_shared_symmetric_scale(const std::array<std::array<float, QK_K>, 4> & values,
-                                       size_t                                         row_count,
-                                       size_t                                         group,
-                                       int                                            quant_min,
-                                       int                                            quant_max,
-                                       bool                                           multistart,
-                                       float &                                        encoded_scale) {
+static bool fit_shared_symmetric_scale(const std::array<std::array<float, QK_K>, kSharedScaleRows> & values,
+                                       size_t                                                       row_count,
+                                       size_t                                                       group,
+                                       int                                                          quant_min,
+                                       int                                                          quant_max,
+                                       bool                                                         multistart,
+                                       float &                                                      encoded_scale) {
     float positive_max = 0.0f;
     float negative_max = 0.0f;
     bool  nonzero      = false;
@@ -421,8 +422,7 @@ static Status materialize_symmetric_k32_eightgroups_shared4(const HostWeightSour
         return status;
     }
 
-    constexpr size_t shared_rows  = 4;
-    const size_t     logical_rows = static_cast<size_t>(source.output_size);
+    const size_t logical_rows = static_cast<size_t>(source.output_size);
     if (logical_rows > std::numeric_limits<size_t>::max() - 255) {
         status.log("layout %s row count overflows row-group sizing", source.layout.c_str());
         return status;
@@ -470,26 +470,26 @@ static Status materialize_symmetric_k32_eightgroups_shared4(const HostWeightSour
 
     output.assign(expected_output_bytes, uint8_t{ 0 });
     const auto * source_bytes        = static_cast<const uint8_t *>(source.host_data) + source.offset;
-    const size_t scale_plane_bytes   = row_group / shared_rows * 16;
+    const size_t scale_plane_bytes   = row_group / kSharedScaleRows * 16;
     const size_t payload_plane_bytes = row_group * field_bytes;
     const size_t payload_block_bytes = 8 * payload_plane_bytes;
     const size_t block_out_bytes     = scale_plane_bytes + payload_block_bytes;
     const size_t row_group_bytes     = block_count * block_out_bytes;
     const size_t source_block_bytes  = ggml_type_size(source.source_type);
-    const size_t logical_cohorts     = (logical_rows + shared_rows - 1) / shared_rows;
+    const size_t logical_cohorts     = (logical_rows + kSharedScaleRows - 1) / kSharedScaleRows;
     const size_t thread_count = std::min<size_t>(logical_cohorts, std::max(1u, std::thread::hardware_concurrency()));
     std::atomic<bool> conversion_failed = false;
 
     auto convert_cohorts = [&](size_t cohort_begin, size_t cohort_end) {
-        std::array<std::array<float, QK_K>, shared_rows> decoded = {};
+        std::array<std::array<float, QK_K>, kSharedScaleRows> decoded = {};
         for (size_t cohort = cohort_begin; cohort < cohort_end; ++cohort) {
             if (conversion_failed.load(std::memory_order_relaxed)) {
                 return;
             }
-            const size_t first_row    = cohort * shared_rows;
-            const size_t row_count    = std::min(shared_rows, logical_rows - first_row);
+            const size_t first_row    = cohort * kSharedScaleRows;
+            const size_t row_count    = std::min(kSharedScaleRows, logical_rows - first_row);
             const size_t row_group_id = first_row / row_group;
-            const size_t cohort_lane  = first_row % row_group / shared_rows;
+            const size_t cohort_lane  = first_row % row_group / kSharedScaleRows;
             for (size_t block = 0; block < block_count; ++block) {
                 for (size_t row = 0; row < row_count; ++row) {
                     const uint8_t * source_row = source_bytes + (first_row + row) * row_bytes;
