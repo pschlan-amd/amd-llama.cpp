@@ -3455,8 +3455,15 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         n_threads = threadpool->n_threads;
     }
 
-    // Kick all threads to start the new graph
-    ggml_graph_compute_kickoff(threadpool, n_threads);
+    if (n_threads == 1) {
+        // run on the main thread only, do not wake the workers
+        // polling workers see the new thread count and go to sleep until the next kickoff
+        const int n_graph = atomic_load_explicit(&threadpool->n_graph, memory_order_relaxed);
+        atomic_store_explicit(&threadpool->n_graph, (n_graph & ~GGML_THREADPOOL_N_THREADS_MASK) | 1, memory_order_seq_cst);
+    } else {
+        // Kick all threads to start the new graph
+        ggml_graph_compute_kickoff(threadpool, n_threads);
+    }
 
     // This is a work thread too
     ggml_graph_compute_thread(&threadpool->workers[0]);
