@@ -783,6 +783,9 @@ void llama_context::sched_new(const sched_params & params) {
     ggml_backend_sched_set_copy_callback(sched.get(), sched_copy_experts, this);
     ggml_backend_sched_set_realloc_callback(sched.get(), sched_graph_realloc, this);
 
+    // pipeline parallelism overlaps the graphs, so the inputs of the next graph can be set before the previous one is done
+    ggml_backend_sched_set_async_inputs(sched.get(), !params.parallel);
+
     sched_params_cur = params;
 }
 
@@ -1871,6 +1874,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // set the input data for the input tensors
     {
         //const auto t_start_us = ggml_time_us();
+
+        // the backends can still copy the inputs of the previous graph (async inputs, see sched_new)
+        if (!cparams.pipeline_parallel) {
+            ggml_backend_sched_synchronize(sched.get());
+        }
 
         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
         res->set_inputs(&ubatch);

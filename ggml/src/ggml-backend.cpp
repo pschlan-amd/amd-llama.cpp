@@ -1268,6 +1268,10 @@ struct ggml_backend_sched {
     int n_prefetched;
     int prefetch_split;     // the split that reads the prefetched inputs
     int prefetch_backend_id; // the backend that copies them
+
+    // see ggml_backend_sched_set_async_inputs
+    bool async_inputs;
+    bool async_pending[GGML_SCHED_MAX_BACKENDS]; // the backend can still read graph inputs from host memory
 };
 
 #define hash_id(tensor) ggml_hash_find_or_insert(&sched->hash_set, tensor)
@@ -2107,6 +2111,17 @@ static bool ggml_backend_sched_is_host_weight(const struct ggml_tensor * t) {
         ggml_backend_buffer_is_host(t->buffer);
 }
 
+// the allocator can reuse the host memory of the inputs after their last copy, wait for the async copies before host memory is written
+// the queue of backend_id is ordered after its own copies
+static void ggml_backend_sched_wait_async_inputs(ggml_backend_sched_t sched, int backend_id) {
+    for (int i = 0; i < sched->n_backends; i++) {
+        if (sched->async_pending[i] && i != backend_id) {
+            ggml_backend_synchronize(sched->backends[i]);
+            sched->async_pending[i] = false;
+        }
+    }
+}
+
 static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggml_backend_sched_split * split, struct ggml_tensor * input) {
     const int split_backend_id = split->backend_id;
     ggml_backend_t split_backend = sched->backends[split_backend_id];
@@ -2124,6 +2139,17 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
     }
 
     if (input->flags & GGML_TENSOR_FLAG_INPUT) {
+        // the backend queues the copy after its previous use of input_cpy, the user keeps the host data until the next synchronize
+        // set_tensor_async of some backends only accepts their default buffer type
+        if (sched->async_inputs && split_backend->iface.set_tensor_async != NULL &&
+            input->buffer != NULL && ggml_backend_buffer_is_host(input->buffer) &&
+            input_cpy->buffer != NULL && !ggml_backend_buffer_is_host(input_cpy->buffer) &&
+            ggml_backend_buffer_get_type(input_cpy->buffer) == ggml_backend_get_default_buffer_type(split_backend)) {
+            ggml_backend_tensor_set_async(split_backend, input_cpy, input->data, 0, ggml_nbytes(input));
+            sched->async_pending[split_backend_id] = true;
+            return;
+        }
+
         // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
             ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
@@ -2209,6 +2235,9 @@ static void ggml_backend_sched_prefetch_inputs(ggml_backend_sched_t sched, int s
             return;
         }
 
+        if (sched->n_prefetched == 0) {
+            ggml_backend_sched_wait_async_inputs(sched, backend_id);
+        }
         ggml_backend_tensor_get_async(backend, input, input_cpy->data, 0, ggml_nbytes(input));
         sched->prefetched[sched->n_prefetched++] = input;
     }
@@ -2230,6 +2259,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         struct ggml_backend_sched_split * split = &splits[split_id];
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
+
+        if (ggml_backend_buft_is_host(sched->bufts[split_backend_id])) {
+            ggml_backend_sched_wait_async_inputs(sched, split_backend_id);
+        }
 
         // ensure the previous split's async work has completed before we start
         // this split, the allocator may have reused buffer regions across splits
@@ -2501,6 +2534,7 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     for (int i = 0; i < sched->n_backends; i++) {
         ggml_backend_synchronize(sched->backends[i]);
+        sched->async_pending[i] = false;
     }
     if (!sched->is_alloc) {
         // if the graph is not already allocated, always use copy 0 after a synchronization
@@ -2526,6 +2560,11 @@ void ggml_backend_sched_set_realloc_callback(ggml_backend_sched_t sched, ggml_ba
     GGML_ASSERT(sched);
     sched->callback_realloc = callback;
     sched->callback_realloc_user_data = user_data;
+}
+
+void ggml_backend_sched_set_async_inputs(ggml_backend_sched_t sched, bool async_inputs) {
+    GGML_ASSERT(sched);
+    sched->async_inputs = async_inputs;
 }
 
 int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {

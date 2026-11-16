@@ -393,6 +393,10 @@ extern "C" {
     // Set a callback to be called when the compute buffers of a graph are being reallocated
     GGML_API void                 ggml_backend_sched_set_realloc_callback(ggml_backend_sched_t sched, ggml_backend_sched_realloc_callback callback, void * user_data);
 
+    // Copy the graph inputs (GGML_TENSOR_FLAG_INPUT) from host memory to the backends without blocking (default: false)
+    // when enabled, the caller must not change the input data until ggml_backend_sched_synchronize is called
+    GGML_API void                 ggml_backend_sched_set_async_inputs(ggml_backend_sched_t sched, bool async_inputs);
+
     //
     // Meta backend
     //
